@@ -12,7 +12,7 @@
 
 
 ## Check google-api [git repo](https://github.com/google/google-api-nodejs-client)
-read/test/paly with samples ...
+read/test/play with samples ...
 
 ## Read The Fucking Doc
 - [Google Drive API](https://developers.google.com/drive/v3/reference/)
@@ -22,3 +22,19 @@ read/test/paly with samples ...
 - npm i googleapis
 
 
+## Start new pascal project
+- implement jwt, gDriveUtils
+- sample console projet
+```pascal
+{$APPTYPE CONSOLE}
+Var GDrive:TrmxGDriveUtils;
+begin
+  ReportMemoryLeaksOnShutdown:=True;
+  GDrive:=TrmxGDriveUtils.Create;
+  try GDrive.OnProgress:=procedure (Const aMsg:String) Begin Writeln(aMsg); end;
+      GDrive.Test;
+
+  except on E: Exception do
+      Writeln(E.ClassName, ': ', E.Message);
+  end;
+```
