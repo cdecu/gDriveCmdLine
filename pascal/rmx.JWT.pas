@@ -84,14 +84,16 @@ Type
 
   TJWT = Class
   private
-    fHeader     : TJWTHeader;
-    fPayload    : TJWTPayload;
-    fSign       : TJWTSign;
+    fHeader       : TJWTHeader;
+    fPayload      : TJWTPayload;
+    fSign         : TJWTSign;
 
-    fHeaderJson : String;
-    fPayloadJson: String;
-    fSignJson   : String;
-    fStrBuilder : TStringBuilder;
+    fHeaderBase64 : String;
+    fPayloadBase64: String;
+    fSignature    : String;
+
+    fStrBuilder   : TStringBuilder;
+    fSSLLibLoaded : Boolean;
 
     ///<summary>Getter</summary>
     function GetHeader: TJWTHeader;
@@ -99,6 +101,8 @@ Type
     function GetPayload: TJWTPayload;
     ///<summary>Getter</summary>
     function JSONEncode64(Const Value:String): String;
+    ///<summary>Load Indy OpenSSLLibrary</summary>
+    function LoadOpenSSLLibrary: Boolean;
   public
     ///<summary>destructor</summary>
     destructor Destroy; override;
@@ -154,11 +158,11 @@ Type
   end;
 
 //TODO   @OpenSSL_add_all_ciphers := LoadFunctionCLib(fn_OpenSSL_add_all_ciphers);
-procedure BIO_free_all(a: pBIO); cdecl;external LIBEAY_DLL_NAME;
-function RSA_private_encrypt(flen: Integer; from: PByte; _to: PByte; rsa: PRSA; padding: Integer): Integer;cdecl;external LIBEAY_DLL_NAME;
+procedure BIO_free_all(a: pBIO); cdecl;external LIBEAY_DLL_NAME delayed;
+function RSA_private_encrypt(flen: Integer; from: PByte; _to: PByte; rsa: PRSA; padding: Integer): Integer;cdecl;external LIBEAY_DLL_NAME delayed;
 
-function EVP_MD_CTX_create: PEVP_MD_CTX; cdecl;external LIBEAY_DLL_NAME;
-procedure EVP_MD_CTX_destroy(ctx: PEVP_MD_CTX); cdecl;external LIBEAY_DLL_NAME;
+function EVP_MD_CTX_create: PEVP_MD_CTX; cdecl;external LIBEAY_DLL_NAME delayed;
+procedure EVP_MD_CTX_destroy(ctx: PEVP_MD_CTX); cdecl;external LIBEAY_DLL_NAME delayed;
 
 {______________________________________________________________________________}
 {______________________________________________________________________________}
@@ -179,6 +183,11 @@ begin
   fCustomKeys.Free;
   inherited;
 end;
+procedure TJWTPayload.Clear;
+begin
+  if fCustomKeys<>nil then
+    fCustomKeys.Clear;
+end;
 {______________________________________________________________________________}
 function TJWTPayload.GetCustomKey(const aKey: string): String;
 begin
@@ -198,11 +207,6 @@ begin
   fCustomKeys.Values[aKey]:=Value;
 end;
 {______________________________________________________________________________}
-procedure TJWTPayload.Clear;
-begin
-  if fCustomKeys<>nil then
-    fCustomKeys.Clear;
-end;
 function TJWTPayload.json: String;
 Var k,v:String;
   i:Integer;
@@ -232,7 +236,7 @@ end;
 {______________________________________________________________________________}
 procedure TJWTSign.Clear;
 begin
-  SetLength(fSignature,0);
+  fSignature:=EmptyStr;
 end;
 {______________________________________________________________________________}
 {______________________________________________________________________________}
@@ -248,30 +252,31 @@ end;
 {______________________________________________________________________________}
 procedure TJWT.Clear;
 Begin
-  SetLength(fHeaderJson ,0);
-  SetLength(fPayloadJson,0);
-  SetLength(fSignJson   ,0);
-
-  if fSign<>nil then
-    fSign.Clear;
+  FreeAndNil(fSign);
   if fPayload<>nil then
     fPayload.Clear;
   if fHeader<>nil then
     fHeader.Clear;
+
+  fHeaderBase64 :=EmptyStr;
+  fPayloadBase64:=EmptyStr;
+  fSignature    :=EmptyStr;
 End;
-{______________________________________________________________________________}
 function TJWT.GetHeader: TJWTHeader;
 begin
   if fHeader=nil then
     fHeader:=TJWTHeader.Create;
   Result:=fHeader;
 end;
-{______________________________________________________________________________}
 function TJWT.GetPayload: TJWTPayload;
 begin
   if fPayload=nil then
     fPayload:=TJWTPayload.Create;
   Result:=fPayload;
+end;
+function TJWT.jwt: String;
+begin
+  Result:=fHeaderBase64+'.'+fPayloadBase64+'.'+fSignature
 end;
 {______________________________________________________________________________}
 function TJWT.JSONEncode64(Const Value:String): String;
@@ -287,8 +292,11 @@ Begin
   for i:=0 to Pred(l) do Begin
     c:=Value.Chars[i];
     if (c > #255) then Begin
-      fStrBuilder.Append(c);
-      Assert(False);
+      fStrBuilder.Append('\u');
+      fStrBuilder.Append(super_hex_chars[Ord(c) shr  4]);
+      fStrBuilder.Append(super_hex_chars[Ord(c) and $f]);
+      fStrBuilder.Append(super_hex_chars[Ord(c) shr  4]);
+      fStrBuilder.Append(super_hex_chars[Ord(c) and $f]);
     End else
       if (c < #32) or (c > #127) then Begin
         fStrBuilder.Append('\u00');
@@ -300,39 +308,51 @@ Begin
 
   Result:=TNetEncoding.Base64.Encode(fStrBuilder.ToString);
 
-  Result := StringReplace(Result, #13#10, '', [rfReplaceAll]);
-  Result := StringReplace(Result, #13   , '', [rfReplaceAll]);
-  Result := StringReplace(Result, #10   , '', [rfReplaceAll]);
+  Result := StringReplace(Result, #13#10,  '', [rfReplaceAll]);
+  Result := StringReplace(Result, #13   ,  '', [rfReplaceAll]);
+  Result := StringReplace(Result, #10   ,  '', [rfReplaceAll]);
   Result := StringReplace(Result, '+'   , '-', [rfReplaceAll]);
   Result := StringReplace(Result, '/'   , '_', [rfReplaceAll]);
   Result := Result.TrimRight(['=']);
+End;
+{______________________________________________________________________________}
+function TJWT.LoadOpenSSLLibrary:Boolean;
+Begin
+  if not fSSLLibLoaded then Begin
+    fSSLLibLoaded:=IdSSLOpenSSL.LoadOpenSSLLibrary
+  end;
+  Result:=fSSLLibLoaded;
 End;
 {______________________________________________________________________________}
 procedure TJWT.Sign(Const aKey:String);
 begin
   if fHeader=nil then
     raise Exception.Create('Header not set');
-  fHeaderJson:=JSONEncode64(fHeader.json);
+  fHeaderBase64:=JSONEncode64(fHeader.json);
 
   if fPayload=nil then
     raise Exception.Create('Payload not set');
-  fPayloadJson:=JSONEncode64(fPayload.json);
+  fPayloadBase64:=JSONEncode64(fPayload.json);
 
   FreeAndNil(fSign);
   case fHeader.fAlg of
-    HS256, HS384, HS512:fSign:=THMACSign.Create;
-    RS256:fSign:=TRS256Sign.Create;
-  else raise Exception.Create('Unsupoorted Alg '+JOSEAlgorithmId[fHeader.fAlg]);
-  end;
+    RS256, RS384, RS512:Begin
+      // using openSSL dll
+      if not Self.LoadOpenSSLLibrary then
+        raise Exception.Create('Unable to load OpenSSL');
+      fSign:=TRS256Sign.Create;
+    end;
+    HS256, HS384, HS512:Begin
+      // using Delphi System.Hash
+      fSign:=THMACSign.Create;
+    end;
+  else Begin
+    raise Exception.Create('Unsupoorted Alg '+JOSEAlgorithmId[fHeader.fAlg]);
+  end end;
 
   fSign.Sign(Self,aKey);
-  fSignJson:=fSign.fSignature;
+  fSignature:=fSign.fSignature;
   FreeAndNil(fSign);
-end;
-{______________________________________________________________________________}
-function TJWT.jwt: String;
-begin
-  Result:=fHeaderJson+'.'+fPayloadJson+'.'+fSignJson
 end;
 {______________________________________________________________________________}
 {______________________________________________________________________________}
@@ -346,8 +366,10 @@ begin
     HS384: LHashAlg := THashSHA2.TSHA2Version.SHA384;
   else   LHashAlg := THashSHA2.TSHA2Version.SHA512;
   end;
-  Input:=TEncoding.UTF8.GetBytes(aJWT.fHeaderJson+'.'+aJWT.fPayloadJson);
+
+  Input:=TEncoding.UTF8.GetBytes(aJWT.fHeaderBase64+'.'+aJWT.fPayloadBase64);
   Res:=THashSHA2.GetHMACAsBytes(Input, AKey, LHashAlg);
+
   fSignature := TNetEncoding.Base64.EncodeBytesToString(Res);
   fSignature := StringReplace(fSignature, #13#10, '', [rfReplaceAll]);
   fSignature := StringReplace(fSignature, #13   , '', [rfReplaceAll]);
@@ -356,6 +378,8 @@ begin
   fSignature := StringReplace(fSignature, '/'   ,'_', [rfReplaceAll]);
   fSignature := fSignature.TrimRight(['=']);
 end;
+{______________________________________________________________________________}
+{______________________________________________________________________________}
 {______________________________________________________________________________}
 destructor TRS256Sign.Destroy;
 begin
@@ -402,15 +426,12 @@ var md_ctx:PEVP_MD_CTX;
   siglen:Integer;
   Input:TBytes;
 begin
-  if not IdSSLOpenSSL.LoadOpenSSLLibrary then
-    raise Exception.Create('Unable to load OpenSSL');
-
-  Input:=TEncoding.UTF8.GetBytes(aJWT.fHeaderJson+'.'+aJWT.fPayloadJson);
+  Input:=TEncoding.UTF8.GetBytes(aJWT.fHeaderBase64+'.'+aJWT.fPayloadBase64);
   FPrivateKey := LoadPrivateKey(aKey);
   if FPrivateKey = nil then
     RaiseLastSSLError;
 
-  mdtype:=EVP_get_digestbyname('RSA-SHA256');//sha512WithRSAEncryption');//RSA-SHA256');//sha256WithRSAEncryption');//shaWithRSAEncryption');//RSA-SHA256');//sha256WithRSAEncryption');
+  mdtype:=EVP_get_digestbyname('RSA-SHA256');
   if mdtype=nil then
     RaiseLastSSLError;
 
